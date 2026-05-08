@@ -370,7 +370,17 @@ async function init() {
 
   const unlocked = getUnlocked();
 
-  // Check auth state
+  // Listen for auth changes FIRST (before any async work)
+  sb.auth.onAuthStateChange(async (event, session) => {
+    if (event === 'SIGNED_IN' && session) {
+      await loadProfile(session.user);
+    } else if (event === 'SIGNED_OUT') {
+      currentUser = currentEmail = null;
+      userLikes = []; userSaved = [];
+    }
+  });
+
+  // Check existing session
   const { data: { session } } = await sb.auth.getSession();
   if (session) {
     await loadProfile(session.user);
@@ -384,45 +394,65 @@ async function init() {
 
   document.getElementById('homeLoading').style.display = 'none';
 
-  if (error || !photos) {
-    document.getElementById('homeEmpty').style.display = 'block';
+  if (error) {
+    const msg = error.message || '';
+    const isNoTable = msg.includes('does not exist') || msg.includes('42P01') || error.code === '42P01';
+    document.getElementById('homeFeed').innerHTML = `
+      <div class="empty-feed">
+        <span class="material-symbols-outlined" style="font-variation-settings:'FILL' 1,'wght' 400,'GRAD' 0,'opsz' 48">warning</span>
+        <p>${isNoTable
+          ? '⚠️ Database tables not found.<br><br>Please run <b>SUPABASE_SCHEMA.sql</b><br>in your Supabase SQL Editor first.'
+          : 'Could not load photos.<br><small style="opacity:.6">' + msg + '</small>'
+        }</p>
+      </div>`;
     return;
   }
 
-  ALL_PHOTOS = photos;
-  const shuffled = [...photos].sort(() => Math.random() - 0.5).slice(0, 10);
+  ALL_PHOTOS = photos || [];
+  const shuffled = [...ALL_PHOTOS].sort(() => Math.random() - 0.5).slice(0, 10);
 
   renderFeed('homeFeed', 'homeEmpty', shuffled, unlocked);
-  renderFeed('newFeed',  'newEmpty',  photos,   unlocked);
-  renderSearchGrid(photos, unlocked);
+  renderFeed('newFeed',  'newEmpty',  ALL_PHOTOS, unlocked);
+  renderSearchGrid(ALL_PHOTOS, unlocked);
 
-  document.getElementById('statPosts').textContent = photos.length;
-
-  // Listen for auth changes
-  sb.auth.onAuthStateChange(async (event, session) => {
-    if (event === 'SIGNED_IN' && session) {
-      await loadProfile(session.user);
-    } else if (event === 'SIGNED_OUT') {
-      currentUser = currentEmail = null;
-      userLikes = []; userSaved = [];
-    }
-  });
+  document.getElementById('statPosts').textContent = ALL_PHOTOS.length;
 }
 
 async function loadProfile(user) {
-  const { data: profile } = await sb
+  // Try to get existing profile
+  let { data: profile, error } = await sb
     .from('profiles')
     .select('username, email, likes, saved')
     .eq('id', user.id)
     .single();
 
-  if (profile) {
-    currentUser  = profile.username;
-    currentEmail = profile.email || user.email;
-    userLikes    = profile.likes || [];
-    userSaved    = profile.saved || [];
-    onLogin(currentUser, currentEmail, userLikes, userSaved);
+  // If no profile, create one automatically
+  if (!profile) {
+    const username = user.user_metadata?.username
+      || user.email?.split('@')[0]?.replace(/[^a-z0-9_]/gi, '') + '_' + user.id.slice(0, 4)
+      || 'user_' + user.id.slice(0, 6);
+
+    const { data: created } = await sb
+      .from('profiles')
+      .upsert({
+        id:       user.id,
+        username: username,
+        email:    user.email,
+        likes:    [],
+        saved:    [],
+        joined:   new Date().toISOString(),
+      }, { onConflict: 'id' })
+      .select('username, email, likes, saved')
+      .single();
+
+    profile = created || { username, email: user.email, likes: [], saved: [] };
   }
+
+  currentUser  = profile.username;
+  currentEmail = profile.email || user.email;
+  userLikes    = profile.likes || [];
+  userSaved    = profile.saved || [];
+  onLogin(currentUser, currentEmail, userLikes, userSaved);
 }
 
 // ── UNLOCKED STATE (localStorage) ─────────────
@@ -789,17 +819,33 @@ async function doSignUp() {
 
   btn.disabled = false; btn.textContent = 'Create account';
 
-  if (error) { showAuthErr(error.message); return; }
+  if (error) {
+    if (error.status === 422 || error.message?.includes('already registered') || error.message?.includes('already been registered')) {
+      showAuthErr('Email already registered. Try signing in instead.');
+    } else if (error.message?.includes('disabled')) {
+      showAuthErr('Sign ups are currently disabled. Contact the admin.');
+    } else {
+      showAuthErr(error.message);
+    }
+    return;
+  }
 
   // If session exists immediately → email confirmation is OFF → auto login
   if (data?.session) {
     await loadProfile(data.user);
     closeAuth();
     showToast('celebration', 'Welcome, ' + username + '!');
-  } else {
-    // Email confirmation is ON → inform the user
-    closeAuth();
-    showToast('mark_email_unread', 'Check your email to confirm your account, then sign in.');
+  } else if (data?.user) {
+    // Email confirmation ON — but user created. Try signing in anyway.
+    const { data: signInData, error: signInErr } = await sb.auth.signInWithPassword({ email, password: pass });
+    if (!signInErr && signInData?.session) {
+      await loadProfile(signInData.user);
+      closeAuth();
+      showToast('celebration', 'Welcome, ' + username + '!');
+    } else {
+      closeAuth();
+      showToast('mark_email_unread', 'Account created! Check your email to confirm, then sign in.');
+    }
   }
 }
 
