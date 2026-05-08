@@ -370,23 +370,20 @@ async function init() {
 
   const unlocked = getUnlocked();
 
-  // Listen for auth changes FIRST (before any async work)
-  sb.auth.onAuthStateChange(async (event, session) => {
-    if (event === 'SIGNED_IN' && session) {
-      await loadProfile(session.user);
+  // IMPORTANT: handle INITIAL_SESSION (fires on page load with existing session)
+  // AND SIGNED_IN (fires after login). Do NOT await loadProfile here — let
+  // photos load in parallel so the spinner always resolves.
+  sb.auth.onAuthStateChange((event, session) => {
+    if ((event === 'SIGNED_IN' || event === 'INITIAL_SESSION') && session) {
+      loadProfile(session.user); // intentionally not awaited
     } else if (event === 'SIGNED_OUT') {
       currentUser = currentEmail = null;
       userLikes = []; userSaved = [];
+      updateNavAvatar(false, '');
     }
   });
 
-  // Check existing session
-  const { data: { session } } = await sb.auth.getSession();
-  if (session) {
-    await loadProfile(session.user);
-  }
-
-  // Load photos
+  // Load photos immediately — do NOT wait for auth
   const { data: photos, error } = await sb
     .from('photos')
     .select('*')
