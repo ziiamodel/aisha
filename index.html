@@ -361,6 +361,7 @@ let currentEmail = null;
 let userLikes    = [];
 let userSaved    = [];
 let lbScale = 1, toastT;
+let loadingProfileForId = null;
 
 function imgUrl(storagePath) {
   return `${SUPABASE_URL}/storage/v1/object/public/photos/${storagePath}`;
@@ -419,9 +420,20 @@ async function init() {
   renderSearchGrid(ALL_PHOTOS, unlocked);
 
   document.getElementById('statPosts').textContent = ALL_PHOTOS.length;
+
+  // Re-apply liked/saved UI state in case loadProfile already finished
+  // before photos were rendered (common on refresh with cached session)
+  if (userLikes.length || userSaved.length || currentUser) {
+    applyLikedSavedUI(userLikes, userSaved);
+    renderProfileGrids(userLikes, userSaved);
+  }
 }
 
 async function loadProfile(user) {
+  // Guard against double calls (onAuthStateChange + doSignIn both triggering)
+  if (loadingProfileForId === user.id) return;
+  loadingProfileForId = user.id;
+
   // Try to get existing profile
   let { data: profile, error } = await sb
     .from('profiles')
@@ -455,6 +467,7 @@ async function loadProfile(user) {
   currentEmail = profile.email || user.email;
   userLikes    = profile.likes || [];
   userSaved    = profile.saved || [];
+  loadingProfileForId = null; // reset guard so future sign-ins work
   onLogin(currentUser, currentEmail, userLikes, userSaved);
 }
 
@@ -657,8 +670,16 @@ async function handleLike(btn) {
     if (ico) ico.style.fontVariationSettings = nowLiked ? "'FILL' 1,'wght' 400,'GRAD' 0,'opsz' 24" : "'FILL' 0,'wght' 400,'GRAD' 0,'opsz' 24";
     b.classList.toggle('icon-active', nowLiked);
     const cnt = b.nextElementSibling;
-    if (cnt?.classList.contains('like-count'))
-      cnt.textContent = Math.max(0, parseInt(cnt.textContent || 0) + (nowLiked ? 1 : -1));
+    if (cnt?.classList.contains('like-count')) {
+      const updatedCount = Math.max(0, parseInt(cnt.textContent || '0') + (nowLiked ? 1 : -1));
+      cnt.textContent = updatedCount;
+      // Also update the "Liked by X others" line in the same card
+      const card = b.closest('.post-card');
+      if (card) {
+        const likeLine = card.querySelector('.like-line b');
+        if (likeLine) likeLine.textContent = updatedCount + ' others';
+      }
+    }
   });
 
   const statEl = document.getElementById('statLiked');
@@ -868,6 +889,9 @@ async function doLogout() {
     if (ico) ico.style.fontVariationSettings = "'FILL' 0,'wght' 400,'GRAD' 0,'opsz' 24";
     b.classList.remove('icon-active');
   });
+  // Clear profile grids so another user's data isn't shown
+  document.getElementById('likedGridWrap').innerHTML = '<div style="text-align:center;padding:32px 20px;color:var(--on-surface-var);font-size:14px">No liked photos yet.</div>';
+  document.getElementById('savedGridWrap').innerHTML = '<div style="text-align:center;padding:32px 20px;color:var(--on-surface-var);font-size:14px">No saved photos yet.<br><span style="font-size:12px;opacity:.6">Tap the bookmark icon on any post.</span></div>';
   showToast('logout', 'Signed out');
 }
 
@@ -882,6 +906,13 @@ function onLogin(u, email, likes, saved) {
   document.getElementById('statLiked').textContent = likes.length;
   document.getElementById('statSaved').textContent = saved.length;
 
+  applyLikedSavedUI(likes, saved);
+
+  renderProfileGrids(likes, saved);
+  switchTab('home');
+}
+
+function applyLikedSavedUI(likes, saved) {
   document.querySelectorAll('.like-btn').forEach(b => {
     const liked = likes.includes(b.dataset.id);
     const ico = b.querySelector('.like-icon');
@@ -894,9 +925,6 @@ function onLogin(u, email, likes, saved) {
     if (ico) ico.style.fontVariationSettings = sv ? "'FILL' 1,'wght' 400,'GRAD' 0,'opsz' 24" : "'FILL' 0,'wght' 400,'GRAD' 0,'opsz' 24";
     b.classList.toggle('icon-active', sv);
   });
-
-  renderProfileGrids(likes, saved);
-  switchTab('home');
 }
 
 function renderProfileGrids(likes, saved) {
@@ -919,6 +947,11 @@ function renderMiniGrid(wrapId, ids, emptyMsg) {
     th.onclick = isU ? () => openLightboxById(id) : () => handleUnlockOrLoginById(id, th);
     grid.appendChild(th);
   });
+  // If none of the IDs matched any loaded photo, show empty message instead of blank grid
+  if (!grid.children.length) {
+    wrap.innerHTML = `<div style="text-align:center;padding:32px 20px;color:var(--on-surface-var);font-size:14px">${emptyMsg}</div>`;
+    return;
+  }
   wrap.innerHTML = ''; wrap.appendChild(grid);
 }
 
