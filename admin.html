@@ -237,10 +237,12 @@ function imgUrl(storagePath) {
 
 // ── API HELPER ─────────────────────────────────
 async function api(body) {
+  const payload = { ...body };
+  if (!payload.password) payload.password = adminPassword;
   const res = await fetch(FUNCTION_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ ...body, password: adminPassword }),
+    body: JSON.stringify(payload),
   });
   return res.json();
 }
